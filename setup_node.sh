@@ -46,7 +46,7 @@ fi
 
 # --- Ссылка на сырой код скрипта в репозитории Balbuto ---
 # (Используется для удаленной автоматической регистрации и обновлений)
-SCRIPT_URL="https://raw.githubusercontent.com/Balbuto/setup-remna-node/dev/setup_node.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/Balbuto/setup-remna-node/main/setup_node.sh"
 
 # --- Цвета ---
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
