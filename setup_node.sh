@@ -1,14 +1,21 @@
 #!/bin/bash
 # ==============================================================================
-# 🚀 ИНТЕРАКТИВНЫЙ ИНСТРУМЕНТ НАСТРОЙКИ И УПРАВЛЕНИЯ REMNANODE (v1.5.2)
+# 🚀 ИНТЕРАКТИВНЫЙ ИНСТРУМЕНТ НАСТРОЙКИ И УПРАВЛЕНИЯ REMNANODE (v1.7.2)
 # ==============================================================================
 # Скрипт автоматического развертывания, оптимизации и маскировки ноды Remnawave.
 # Объединяет лучшие практики безопасности, сетевой оптимизации и отказоустойчивости.
 #
 # Особенности:
 #  - Полностью русифицированный интерфейс и информационные сообщения
-#  - Исправлен баг монтирования SSL-сертификатов в контейнер Nginx (Reality fallback)
-#  - Полная поддержка HTTPS-маскировки в обоих режимах (Reality и VLESS+TLS)
+#  - Исправлена константа SCRIPT_URL на правильный адрес репозитория Balbuto
+#  - Принудительная мгновенная проверка прав root на первой строчке запуска скрипта
+#  - Полный вынос и отображение внутренних логов Xray (out/err) на хост
+#  - Полностью исправлена подсистема диагностики (устойчива к локалям и pipefail)
+#  - Исправлен баг Nginx proxy_protocol в TLS/xHTTP режимах (сайт-заглушка работает!)
+#  - Предотвращение конфликтов портов при одновременном запуске TLS и xHTTP
+#  - Поддержка передового протокола VLESS+TLS+xHTTP (Xray-Core)
+#  - Смена маскировочных шаблонов: как случайно, так и выбор конкретного из списка
+#  - Встроенный профессиональный мутатор 'uniquify-theme' и шаблоны Mrvibecodic
 #  - Интерактивная настройка и открытие кастомных портов Xray Core в UFW
 #  - Динамическое удаление образов Docker (images) при деинсталляции
 #  - Автоматическая глобальная регистрация команды 'remnanode' при первом запуске
@@ -19,17 +26,27 @@
 #  - Строгий режим Bash: set -Eeuo pipefail
 #  - Оптимизация сети (BBR + SAFE/HIGHLOAD Sysctl профили)
 #  - Выбор версий Xray-Core (включая pre-releases) через GitHub API
-#  - Поддержка двух протоколов: VLESS Reality (Selfsteal) и VLESS+TLS
-#  - Прописывание SSL-сертификатов непосредственно в секцию remnanode (для TLS)
+#  - Поддержка трех протоколов: VLESS Reality (Selfsteal), VLESS+TLS, VLESS+TLS+xHTTP
+#  - Прописывание SSL-сертификатов непосредственно в секцию remnanode (для TLS/xHTTP)
 #  - Полный вынос логов Nginx и Remnanode на хост с авторотацией (logrotate)
 #  - Скрытность маскировочных сайтов (мутация HTML, мета-тегов и CSS)
-#  - Автоматическая настройка UFW с ограничением доступа к порту управления
+#  - Безопасная, недеструктивная настройка UFW (без сброса не связанных правил)
 #  - Множественные варианты выпуска SSL: Standalone, Cloudflare DNS, Gcore DNS
 #  - Управление IPv6, смена доменов, смена IP панели и чистый деинсталлятор
 # ==============================================================================
 
 set -Eeuo pipefail
 IFS=$'\n\t'
+
+# --- ЖЕСТКАЯ ПРОВЕРКА ПРАВ ROOT (Выполняется на самом первом этапе, до инициализации файлов) ---
+if [ "$EUID" -ne 0 ]; then
+    echo -e "\033[0;31m[✗] Ошибка: Этот скрипт должен быть запущен от имени root! Пожалуйста, используйте 'sudo' или 'su'.\033[0m" >&2
+    exit 1
+fi
+
+# --- Ссылка на сырой код скрипта в репозитории Balbuto ---
+# (Используется для удаленной автоматической регистрации и обновлений)
+SCRIPT_URL="https://raw.githubusercontent.com/Balbuto/setup-remna-node/dev/setup_node.sh"
 
 # --- Цвета ---
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -66,13 +83,6 @@ log() {
 }
 
 # --- Проверки окружения ---
-check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        log "${ERROR} Этот скрипт должен быть запущен от имени root!"
-        exit 1
-    fi
-}
-
 check_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
@@ -94,15 +104,37 @@ detect_arch() {
     esac
 }
 
-# --- Автоматическая регистрация команды в системе ---
+# --- Автоматическая регистрация команды в системе (С исправлениями для удаленного curl-запуска) ---
 register_globally() {
     local script_path; script_path=$(readlink -f "$0")
-    if [ "$script_path" != "/usr/local/bin/remnanode" ]; then
-        ln -sf "$script_path" "/usr/local/bin/remnanode" &>/dev/null || cp "$script_path" "/usr/local/bin/remnanode" &>/dev/null
-        chmod +x "/usr/local/bin/remnanode" 2>/dev/null || true
-        log "${SUCCESS} Скрипт успешно зарегистрирован в системе!"
-        log "${INFO} Теперь вы можете запускать меню из любой папки командой: ${GREEN}remnanode${NC}"
-        sleep 1.5
+    
+    # Обнаружение удаленного запуска (через curl | bash или bash <(curl ...))
+    if [[ "$script_path" =~ /dev/fd/ || "$script_path" == "bash" || "$script_path" == "stdin" || ! -f "$script_path" ]]; then
+        log "${INFO} Обнаружен удаленный запуск скрипта. Загружаем физический файл в систему..."
+        mkdir -p "/usr/local/bin"
+        
+        # Скачиваем файл скрипта напрямую по SCRIPT_URL
+        if wget -q -O "/usr/local/bin/remnanode" "$SCRIPT_URL"; then
+            chmod +x "/usr/local/bin/remnanode" 2>/dev/null || true
+            log "${SUCCESS} Скрипт успешно сохранен и зарегистрирован как команда: ${GREEN}remnanode${NC}"
+            sleep 1.5
+        else
+            # Резервная попытка через curl
+            if curl -sSL "$SCRIPT_URL" -o "/usr/local/bin/remnanode" 2>/dev/null; then
+                chmod +x "/usr/local/bin/remnanode" 2>/dev/null || true
+                log "${SUCCESS} Скрипт успешно сохранен и зарегистрирован как команда: ${GREEN}remnanode${NC}"
+                sleep 1.5
+            fi
+        fi
+    else
+        # Локальный классический запуск
+        if [ "$script_path" != "/usr/local/bin/remnanode" ]; then
+            ln -sf "$script_path" "/usr/local/bin/remnanode" &>/dev/null || cp "$script_path" "/usr/local/bin/remnanode" &>/dev/null
+            chmod +x "/usr/local/bin/remnanode" 2>/dev/null || true
+            log "${SUCCESS} Скрипт успешно зарегистрирован в системе!"
+            log "${INFO} Теперь вы можете запускать меню из любой папки командой: ${GREEN}remnanode${NC}"
+            sleep 1.5
+        fi
     fi
 }
 
@@ -213,7 +245,7 @@ EOF
 install_dependencies() {
     log "${INFO} Установка необходимых пакетов..."
     apt-get update -qq
-    apt-get install -y -qq curl wget jq unzip tar cron logrotate ufw certbot ca-certificates gnupg python3-pip >> "$LOG_FILE" 2>&1
+    apt-get install -y -qq curl wget jq unzip tar cron logrotate ufw certbot ca-certificates gnupg python3-pip perl openssl >> "$LOG_FILE" 2>&1
     
     # Безопасная установка Docker через официальный репозиторий
     if ! command -v docker &> /dev/null; then
@@ -528,18 +560,20 @@ EOF
     chmod +x "$renew_hook_file"
 }
 
-# --- Маскировочные шаблоны (SelfSteal) ---
+# --- Маскировочные шаблоны (SelfSteal + встроенный мутатор Mrvibecodic/node-templates) ---
 generate_masked_template() {
     local decoy_domain="$1"
-    log "${INFO} Генерация маскировочного сайта SelfSteal для домена маскировки ${CYAN}$decoy_domain${NC}..."
+    local chosen_template_arg="${2:-}"  # Необязательный аргумент конкретного шаблона
+    
+    log "${INFO} Загрузка профессиональных шаблонов маскировки Mrvibecodic/node-templates..."
     
     mkdir -p "$WWW_DIR"
     local temp_zip; temp_zip=$(mktemp)
     
-    # Скачивание коллекции шаблонов
-    local templates_url="https://github.com/eGamesAPI/simple-web-templates/archive/refs/heads/main.zip"
+    # Скачивание репозитория Mrvibecodic/node-templates с мутатором
+    local templates_url="https://github.com/Mrvibecodic/node-templates/archive/refs/heads/main.zip"
     if ! wget -q -O "$temp_zip" "$templates_url"; then
-        log "${WARNING} Не удалось скачать шаблоны, генерируем базовую уникальную HTML заглушку."
+        log "${WARNING} Не удалось скачать шаблоны Mrvibecodic, генерируем базовую уникальную HTML заглушку."
         create_fallback_html "$decoy_domain"
         rm -f "$temp_zip"
         return
@@ -548,45 +582,51 @@ generate_masked_template() {
     local temp_unzip; temp_unzip=$(mktemp -d)
     unzip -q -o "$temp_zip" -d "$temp_unzip"
     
-    # Выбор случайного шаблона
-    local template_path; template_path=$(find "$temp_unzip" -maxdepth 2 -type d -name "simple-web-templates-main" | head -n 1)
-    if [ -z "$template_path" ]; then
+    local repo_root="$temp_unzip/node-templates-main"
+    if [ ! -d "$repo_root" ]; then
+        log "${WARNING} Ошибка структуры архива. Генерируем базовую HTML заглушку."
         create_fallback_html "$decoy_domain"
         rm -rf "$temp_unzip" "$temp_zip"
         return
     fi
     
-    # Выбор случайной папки с сайтом
-    mapfile -t subdirs < <(find "$template_path" -maxdepth 1 -type d -not -path "$template_path")
-    if [ ${#subdirs[@]} -eq 0 ]; then
-        create_fallback_html "$decoy_domain"
-        rm -rf "$temp_unzip" "$temp_zip"
-        return
+    # Доступные высококачественные шаблоны
+    local templates=("endless-verify" "esports-stream-template" "levelup-hub" "playza-game-catalog" "rybaliti-2.0" "screenwire-digest" "vibrai-photo-editor" "worldzoo-stream-template")
+    
+    # Определяем выбранный шаблон (случайный или конкретный)
+    local selected_template=""
+    if [ -n "$chosen_template_arg" ]; then
+        selected_template="$chosen_template_arg"
+    else
+        selected_template="${templates[$RANDOM % ${#templates[@]}]}"
     fi
     
-    local random_subdir; random_subdir="${subdirs[$RANDOM % ${#subdirs[@]}]}"
-    cp -r "$random_subdir/"* "$WWW_DIR/"
+    log "${INFO} Выбран профессиональный шаблон маскировки: ${CYAN}$selected_template${NC}"
     
-    # --- Мутация и Анти-фингерпринтинг ---
-    # 1. Удаление маркерных файлов лицензий и readme
-    find "$WWW_DIR" -type f \( -iname "*.md" -o -iname "*readme*" -o -iname "*license*" \) -delete 2>/dev/null || true
+    # Запускаем продвинутую контекстную мутацию и анти-фингерпринтинг с помощью uniquify-theme.sh
+    local temp_out; temp_out=$(mktemp -d)
     
-    # 2. Рандомизация бренда и контента
-    local brands=("Lumen Cloud" "Ember Tech" "Aero Space" "Apex Studio" "Nova System" "Vertex Flow" "Quartz Link" "Cobalt Forge")
-    local selected_brand="${brands[$RANDOM % ${#brands[@]}]}"
-    local random_id; random_id=$(openssl rand -hex 4)
-    local random_comment; random_comment=$(openssl rand -hex 16)
+    log "${INFO} Запуск мутатора уникальности кода 'uniquify-theme'..."
+    if bash "$repo_root/uniquify-theme.sh" \
+        -s "$repo_root/$selected_template" \
+        -o "$temp_out" \
+        --seed "$(openssl rand -hex 16)" \
+        --no-zip \
+        --no-install-deps >> "$LOG_FILE" 2>&1; then
+        
+        # Полностью очищаем WWW_DIR и копируем мутированные файлы
+        rm -rf "$WWW_DIR"/* 2>/dev/null || true
+        mkdir -p "$WWW_DIR"
+        cp -r "$temp_out"/* "$WWW_DIR/"
+        log "${SUCCESS} Маскировочный сайт успешно сгенерирован и полностью уникализирован по хэшам и классам!"
+    else
+        log "${WARNING} Ошибка работы мутатора uniquify-theme. Копируем файлы без мутации."
+        rm -rf "$WWW_DIR"/* 2>/dev/null || true
+        mkdir -p "$WWW_DIR"
+        cp -r "$repo_root/$selected_template"/* "$WWW_DIR/"
+    fi
     
-    # 3. Применение мутации к HTML файлам (Исправлено: разделители sed изменены на '#' и удалены неверные флаги во избежание сбоев)
-    find "$WWW_DIR" -type f -name "*.html" -exec sed -i \
-        -e "s#<title>.*</title>#<title>${selected_brand}</title>#" \
-        -e "s#MyWebSite#${selected_brand}#g" \
-        -e "s#</head>#<meta name=\"identity-hash\" content=\"${random_id}\">\n<!-- ID: ${random_comment} -->\n</head>#" \
-        -e "s#fonts\.googleapis\.com##g; s#fonts\.gstatic\.com##g" \
-        {} \;
-    
-    rm -rf "$temp_unzip" "$temp_zip"
-    log "${SUCCESS} Маскировочный сайт успешно развернут с мутацией анти-фингерпринтинга."
+    rm -rf "$temp_unzip" "$temp_zip" "${temp_out:-}"
 }
 
 create_fallback_html() {
@@ -663,8 +703,8 @@ services:
       - .env
     volumes:
       - /dev/shm:/dev/shm:rw
-      - $LOG_DIR/node:/var/log/remnanode
-$( [ "$protocol" = "tls" ] && echo "      - $CERTS_DIR:/etc/xray/certs:ro" )
+      - $LOG_DIR/node:/var/log/supervisor
+$( [ "$protocol" = "tls" ] || [ "$protocol" = "xhttp" ] && echo "      - $CERTS_DIR:/etc/xray/certs:ro" )
 $( [ "$XRAY_VERSION_CHOICE" != "built-in" ] && echo "      - $XRAY_FILE:/usr/local/bin/xray" )
 $( [ "$XRAY_VERSION_CHOICE" != "built-in" ] && [ -f "$XRAY_BIN_DIR/geoip.dat" ] && echo "      - $XRAY_BIN_DIR/geoip.dat:/usr/local/share/xray/geoip.dat" )
 $( [ "$XRAY_VERSION_CHOICE" != "built-in" ] && [ -f "$XRAY_BIN_DIR/geosite.dat" ] && echo "      - $XRAY_BIN_DIR/geosite.dat:/usr/local/share/xray/geosite.dat" )
@@ -710,12 +750,22 @@ server {
     }
 }
 EOF
+
+        # Установка snakeoil сертификатов если их нет (нужно для валидности конфига Nginx)
+        if [ ! -f /etc/ssl/certs/ssl-cert-snakeoil.pem ]; then
+            apt-get install -y ssl-cert >> "$LOG_FILE" 2>&1 || {
+                openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+                -keyout /etc/ssl/private/ssl-cert-snakeoil.key \
+                -out /etc/ssl/certs/ssl-cert-snakeoil.pem \
+                -subj "/CN=localhost" >> "$LOG_FILE" 2>&1
+            }
+        fi
     else
-        # VLESS+TLS: Xray сам расшифровал TLS трафик на внешнем 443 порту с Let's Encrypt,
-        # Nginx принимает чистый HTTP fallback запрос от Xray по локальному Unix-сокету
+        # VLESS+TLS / VLESS+TLS+xHTTP: Xray расшифровал трафик (или использует чистый сокет), 
+        # Nginx принимает HTTP-запросы из Unix-сокета с поддержкой proxy_protocol (Исправлено!)
         cat > nginx.conf <<EOF
 server {
-    listen unix:/dev/shm/nginx.sock default_server;
+    listen unix:/dev/shm/nginx.sock proxy_protocol default_server;
     server_name _;
 
     root /var/www/html;
@@ -749,8 +799,7 @@ configure_firewall() {
     
     log "${INFO} Настройка брандмауэра UFW..."
     
-    # 1. Сброс правил во избежание старых зависших фильтров
-    ufw --force reset >> "$LOG_FILE" 2>&1 || true
+    # 1. Задаем политики по умолчанию, не сбрасывая фаервол полностью во избежание пропажи SSH/других правил
     ufw default deny incoming >> "$LOG_FILE" 2>&1 || true
     ufw default allow outgoing >> "$LOG_FILE" 2>&1 || true
     
@@ -762,10 +811,11 @@ configure_firewall() {
             ssh_port="$detected_port"
         fi
     fi
-    log "${INFO} Обнаружен активный порт SSH: ${CYAN}$ssh_port${NC}. Добавляем разрешение."
+    log "${INFO} Разрешаем активный порт SSH: ${CYAN}$ssh_port${NC}"
     ufw allow "$ssh_port"/tcp comment 'SSH Port' >> "$LOG_FILE" 2>&1
     
-    # 3. Разрешение веб-трафика для Xray / Nginx
+    # 3. Разрешение веб-трафика для Xray / Nginx (HTTP, HTTPS)
+    log "${INFO} Разрешаем порты HTTP (80) и HTTPS (443) для Xray/Nginx..."
     ufw allow 80/tcp comment 'HTTP / Certbot' >> "$LOG_FILE" 2>&1
     ufw allow 443/tcp comment 'Xray Incoming TCP' >> "$LOG_FILE" 2>&1
     ufw allow 443/udp comment 'Xray Incoming UDP' >> "$LOG_FILE" 2>&1
@@ -790,7 +840,186 @@ configure_firewall() {
     ufw --force enable >> "$LOG_FILE" 2>&1
     ufw reload >> "$LOG_FILE" 2>&1
     
-    log "${SUCCESS} Брандмауэр UFW успешно активирован и настроен!"
+    log "${SUCCESS} Брандмауэр UFW успешно настроен!"
+}
+
+# --- Вспомогательный безопасный запуск внешних скриптов с HTTPS и TLS (По типу Balbuto) ---
+run_verified_benchmark() {
+    local name="$1"
+    local url="$2"
+    local args="${3:-}"
+    
+    echo -e "\n${BLUE}🧪 Запуск теста: ${WHITE}$name${NC}..."
+    echo -e "${GRAY}Безопасная загрузка с: $url${NC}"
+    
+    local temp_script; temp_script=$(mktemp)
+    
+    # Скачивание только по HTTPS с протоколом TLS 1.2+
+    if curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 -o "$temp_script" "$url" 2>>"$LOG_FILE"; then
+        chmod +x "$temp_script"
+        echo -e "${GREEN}Запуск теста...${NC}\n"
+        
+        # Выполнение в подоболочке с локально выключенным set -e, чтобы падение теста не уронило весь CLI
+        (
+            set +e
+            set +o pipefail
+            if [ -n "$args" ]; then
+                bash "$temp_script" $args
+            else
+                bash "$temp_script"
+            fi
+        )
+        echo -e "\n${SUCCESS} Тест '${name}' завершен!"
+    else
+        echo -e "${ERROR} Ошибка скачивания скрипта. Проверьте подключение к сети."
+    fi
+    rm -f "$temp_script"
+}
+
+# --- Подсистема проведения комплексных мульти-тестов сервера (v1.7.0) ---
+run_server_multitests() {
+    (
+        set +e
+        set +o pipefail
+        
+        while true; do
+            clear
+            echo -e "${GREEN}"
+            echo "  ========================================================"
+            echo "  🧪 МУЛЬТИ-ТЕСТЫ И ДИАГНОСТИКА СЕРВЕРА (v1.7.0)"
+            echo "  ========================================================"
+            echo -e "${NC}"
+            echo " Выберите тест для запуска:"
+            echo " 1) 🌍 Проверка локации IP и провайдера (IP Geolocation)"
+            echo " 2) 🚫 Censorcheck — Тест геоблокировок (доступность RU/западных сайтов)"
+            echo " 3) 🕵️ Censorcheck — Тест DPI (активное вмешательство провайдера)"
+            echo " 4) ⚡ iPerf3 RU — Скорость интернета до серверов в РФ"
+            echo " 5) 💾 YABS — Тест производительности процессора и скорости диска (fio)"
+            echo " 6) 📡 IP Check Place — Проверка качества и репутационного скора IP"
+            echo " 7) 📊 bench.sh — Классический тест параметров железа и сети"
+            echo " 8) 🔥 sysbench CPU — Локальный стресс-тест вычислительных ядер"
+            echo " 9) 🧠 sysbench Memory — Стресс-тест скорости оперативной памяти"
+            echo " 10) 🗺️  Проверка пинга и маршрута (Traceroute) до yandex.ru"
+            echo " 99) 🚀 Запустить ВСЕ доступные тесты по очереди"
+            echo " 0) Назад"
+            echo -e "${GRAY}--------------------------------------------------${NC}"
+            read -p "Выберите действие [0-99]: " test_choice
+            test_choice=${test_choice:-0}
+
+            case $test_choice in
+                1)
+                    clear
+                    echo -e "${BLUE}🌍 Проверка локации IP и провайдера...${NC}\n"
+                    curl -fsSL --proto '=https' --tlsv1.2 https://ipapi.co/json 2>/dev/null | jq '.' || \
+                    curl -fsSL --proto '=https' --tlsv1.2 https://ipinfo.io 2>/dev/null || echo "Ошибка получения данных."
+                    pause_prompt
+                    ;;
+                2)
+                    clear
+                    run_verified_benchmark "Censorcheck (Геоблоки)" "https://github.com/vernette/censorcheck/raw/master/censorcheck.sh" "--mode geoblock"
+                    pause_prompt
+                    ;;
+                3)
+                    clear
+                    run_verified_benchmark "Censorcheck (DPI Тест)" "https://github.com/vernette/censorcheck/raw/master/censorcheck.sh" "--mode dpi"
+                    pause_prompt
+                    ;;
+                4)
+                    clear
+                    echo -e "${INFO} Установка iperf3 для запуска теста скорости..."
+                    apt-get install -y -qq iperf3 >> "$LOG_FILE" 2>&1 || true
+                    run_verified_benchmark "iPerf3 RU Speedtest" "https://github.com/itdoginfo/russian-iperf3-servers/raw/main/speedtest.sh"
+                    pause_prompt
+                    ;;
+                5)
+                    clear
+                    run_verified_benchmark "YABS (Yet Another Bench Script)" "https://yabs.sh" "-4"
+                    pause_prompt
+                    ;;
+                6)
+                    clear
+                    run_verified_benchmark "IP Check Place" "https://ip.check.place/script/check.sh" "-l ru"
+                    pause_prompt
+                    ;;
+                7)
+                    clear
+                    run_verified_benchmark "bench.sh" "https://bench.sh"
+                    pause_prompt
+                    ;;
+                8)
+                    clear
+                    echo -e "${BLUE}🔥 Стресс-тест процессора через sysbench CPU...${NC}\n"
+                    if ! command -v sysbench &>/dev/null; then
+                        echo -e "${INFO} Установка sysbench для проведения стресс-тестов..."
+                        apt-get install -y -qq sysbench >> "$LOG_FILE" 2>&1 || true
+                    fi
+                    if command -v sysbench &>/dev/null; then
+                        sysbench cpu --cpu-max-prime=20000 run
+                    else
+                        echo -e "${ERROR} Не удалось установить sysbench."
+                    fi
+                    pause_prompt
+                    ;;
+                9)
+                    clear
+                    echo -e "${BLUE}🧠 Стресс-тест оперативной памяти через sysbench Memory...${NC}\n"
+                    if ! command -v sysbench &>/dev/null; then
+                        echo -e "${INFO} Установка пакета sysbench..."
+                        apt-get install -y -qq sysbench >> "$LOG_FILE" 2>&1 || true
+                    fi
+                    if command -v sysbench &>/dev/null; then
+                        sysbench memory run
+                    else
+                        echo -e "${ERROR} Не удалось установить sysbench."
+                    fi
+                    pause_prompt
+                    ;;
+                10)
+                    clear
+                    echo -e "${BLUE}🗺️  Проверка пинга и маршрута до yandex.ru...${NC}\n"
+                    if ! command -v traceroute &>/dev/null; then
+                        echo -e "${INFO} Установка пакета traceroute..."
+                        apt-get install -y -qq traceroute >> "$LOG_FILE" 2>&1 || true
+                    fi
+                    echo -e "\n${BLUE}Выполнение Ping (4 пакета):${NC}"
+                    ping -c 4 yandex.ru || true
+                    if command -v traceroute &>/dev/null; then
+                        echo -e "\n${BLUE}Выполнение Traceroute (макс. 20 хопов):${NC}"
+                        traceroute -m 20 yandex.ru || true
+                    fi
+                    pause_prompt
+                    ;;
+                99)
+                    clear
+                    echo -e "${BLUE}🚀 Запуск ВСЕХ тестов по очереди (это может занять несколько минут)...${NC}\n"
+                    
+                    # 1. IP
+                    echo -e "\n🌍 --- Геолокация IP ---"
+                    curl -fsSL --proto '=https' --tlsv1.2 https://ipapi.co/json 2>/dev/null | jq '.' || true
+                    # 2. Censorcheck Geoblock
+                    run_verified_benchmark "Censorcheck (Геоблоки)" "https://github.com/vernette/censorcheck/raw/master/censorcheck.sh" "--mode geoblock"
+                    # 3. Censorcheck DPI
+                    run_verified_benchmark "Censorcheck (DPI Тест)" "https://github.com/vernette/censorcheck/raw/master/censorcheck.sh" "--mode dpi"
+                    # 4. YABS
+                    run_verified_benchmark "YABS (Yet Another Bench Script)" "https://yabs.sh" "-4"
+                    # 5. IP check place
+                    run_verified_benchmark "IP Check Place" "https://ip.check.place/script/check.sh" "-l ru"
+                    # 6. sysbench CPU
+                    if command -v sysbench &>/dev/null || apt-get install -y -qq sysbench &>>"$LOG_FILE"; then
+                        sysbench cpu --cpu-max-prime=15000 run || true
+                    fi
+                    # 7. Ping
+                    ping -c 4 yandex.ru || true
+                    
+                    log "${SUCCESS} Все тесты успешно завершены!"
+                    pause_prompt
+                    ;;
+                0)
+                    return
+                    ;;
+            esac
+        done
+    )
 }
 
 # --- Функция паузы в меню ---
@@ -876,12 +1105,15 @@ run_initial_setup() {
     echo -e "\nВыберите тип шифрования клиентского трафика:"
     echo " 1) VLESS Reality (маскировочный сайт / Selfsteal)"
     echo " 2) VLESS+TLS (классический TLS с вашим доменом ноды)"
+    echo " 3) VLESS+TLS+xHTTP (новый высокопроизводительный транспортный протокол Xray)"
     read -p "Ваш выбор [1]: " proto_choice
     proto_choice=${proto_choice:-1}
     
     local protocol="reality"
     if [ "$proto_choice" -eq 2 ]; then
         protocol="tls"
+    elif [ "$proto_choice" -eq 3 ]; then
+        protocol="xhttp"
     fi
     
     # Скачивание и генерация маскировочного сайта SelfSteal
@@ -945,7 +1177,7 @@ change_domain_and_ssl() {
     # Перегенерируем маскировочный сайт в любом случае
     generate_masked_template "$NODE_DOMAIN"
 
-    if [ "$protocol" = "tls" ]; then
+    if [ "$protocol" = "tls" ] || [ "$protocol" = "xhttp" ]; then
         issue_ssl_certificates_multi "$NODE_DOMAIN"
     fi
     
@@ -995,8 +1227,8 @@ change_panel_ip() {
         return
     fi
     
-    local old_panel_ip; old_panel_ip=$(cat "$APP_DIR/.panel_ip" 2>/dev/null || echo "Не найден")
-    log "${INFO} Текущий разрешенный IP панели: ${YELLOW}$old_panel_ip${NC}"
+    local old_panel_ip; old_panel_ip=$(cat "$APP_DIR/.panel_ip" 2>/dev/null || echo "")
+    log "${INFO} Текущий разрешенный IP панели: ${YELLOW}${old_panel_ip:-Не определен}${NC}"
     
     read -p "Введите новый IP адрес панели: " new_panel_ip
     while [[ ! "$new_panel_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; do
@@ -1005,8 +1237,16 @@ change_panel_ip() {
     
     local node_port; node_port=$(grep "NODE_PORT" "$APP_DIR/.env" | cut -d'=' -f2 | xargs || echo "2222")
     
-    # Настраиваем UFW под новый IP
-    configure_firewall "$node_port" "$new_panel_ip"
+    # Недеструктивное удаление старого правила
+    if [ -n "$old_panel_ip" ]; then
+        log "${INFO} Удаление старого правила UFW для IP панели: ${YELLOW}$old_panel_ip${NC}"
+        ufw delete allow from "$old_panel_ip" to any port "$node_port" proto tcp >> "$LOG_FILE" 2>&1 || true
+    fi
+    
+    # Добавление правила для нового IP панели
+    log "${INFO} Добавление правила UFW для нового IP панели: ${GREEN}$new_panel_ip${NC}"
+    ufw allow from "$new_panel_ip" to any port "$node_port" proto tcp comment 'Remnanode Control from Panel' >> "$LOG_FILE" 2>&1
+    ufw reload >> "$LOG_FILE" 2>&1
     
     # Сохраняем новый IP
     echo "$new_panel_ip" > "$APP_DIR/.panel_ip"
@@ -1117,105 +1357,125 @@ uninstall_and_rollback() {
 
 # 7)  Диагностика и просмотр логов (в стиле DigneZzZ/remnawave-scripts)
 diagnose_and_logs() {
-    while true; do
-        clear
-        echo -e "${GREEN}"
-        echo "  ========================================================"
-        echo "  📊 ДИАГНОСТИКА И ПРОСМОТР ЛОГОВ НОДЫ"
-        echo "  ========================================================"
-        echo -e "${NC}"
-        
-        if [ ! -f "$APP_DIR/docker-compose.yml" ]; then
-            log "${ERROR} Нода еще не установлена! Логи недоступны."
-            pause_prompt
-            return
-        fi
+    # Создаем подоболочку (subshell) с отключенным строгим режимом во избежание сбоев из-за локалей или отсутствия файлов
+    (
+        set +e
+        set +o pipefail
 
-        # 1. Проверка системных ресурсов
-        echo -e "📌 ${WHITE}Ресурсы сервера:${NC}"
-        local cpu_use; cpu_use=$(top -bn1 2>/dev/null | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1"%"}' || echo "Недоступно")
-        local mem_use; mem_use=$(free -h 2>/dev/null | grep Mem | awk '{print $3 " / " $2}' || echo "Недоступно")
-        local disk_use; disk_use=$(df -h / 2>/dev/null | tail -1 | awk '{print $5 " (Свободно " $4 ")"}' || echo "Недоступно")
-        
-        echo -e "   - Загрузка CPU:     ${CYAN}$cpu_use${NC}"
-        echo -e "   - Использование ОЗУ: ${CYAN}$mem_use${NC}"
-        echo -e "   - Занято на диске:   ${CYAN}$disk_use${NC}"
-        
-        # 2. Проверка статуса докеров
-        echo -e "\n📌 ${WHITE}Статус Docker контейнеров:${NC}"
-        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "remnanode"; then
-            echo -e "   - remnanode:        ${GREEN}● Запущен${NC}"
-        else
-            echo -e "   - remnanode:        ${RED}○ Остановлен${NC}"
-        fi
-        
-        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "remnawave-nginx"; then
-            echo -e "   - remnawave-nginx:  ${GREEN}● Запущен${NC}"
-        else
-            echo -e "   - remnawave-nginx:  ${RED}○ Остановлен${NC}"
-        fi
-        
-        # 3. Вес файлов логов на хосте
-        echo -e "\n📌 ${WHITE}Размер лог-файлов на хосте:${NC}"
-        local node_acc_size; node_acc_size=$(du -sh "$LOG_DIR/node/access.log" 2>/dev/null | awk '{print $1}' || echo "0B")
-        local node_err_size; node_err_size=$(du -sh "$LOG_DIR/node/error.log" 2>/dev/null | awk '{print $1}' || echo "0B")
-        local nginx_acc_size; nginx_acc_size=$(du -sh "$LOG_DIR/nginx/access.log" 2>/dev/null | awk '{print $1}' || echo "0B")
-        local nginx_err_size; nginx_err_size=$(du -sh "$LOG_DIR/nginx/error.log" 2>/dev/null | awk '{print $1}' || echo "0B")
-        
-        echo -e "   - Xray access.log:  ${CYAN}$node_acc_size${NC}"
-        echo -e "   - Xray error.log:   ${CYAN}$node_err_size${NC}"
-        echo -e "   - Nginx access.log:  ${CYAN}$nginx_acc_size${NC}"
-        echo -e "   - Nginx error.log:   ${CYAN}$nginx_err_size${NC}"
-        
-        echo -e "${GRAY}--------------------------------------------------${NC}"
-        echo " 1) 📥 Лог запросов Xray (access.log) в реальном времени"
-        echo " 2) 📥 Лог ошибок Xray (error.log) в реальном времени"
-        echo " 3) 📥 Лог запросов веб-сервера Nginx в реальном времени"
-        echo " 4) 📥 Вывод логов из контейнера Docker (remnanode)"
-        echo " 5) 🔄 Вынужденно применить ротацию логов (logrotate)"
-        echo " 0) Назад"
-        echo -e "${GRAY}--------------------------------------------------${NC}"
-        read -p "Выберите действие [0-5]: " log_choice
-        log_choice=${log_choice:-0}
-        
-        case $log_choice in
-            1)
-                clear
-                echo -e "${BLUE}Показ лога access.log (Выход: Ctrl+C)...${NC}\n"
-                tail -n 100 -f "$LOG_DIR/node/access.log" || true
-                ;;
-            2)
-                clear
-                echo -e "${BLUE}Показ лога error.log (Выход: Ctrl+C)...${NC}\n"
-                tail -n 100 -f "$LOG_DIR/node/error.log" || true
-                ;;
-            3)
-                clear
-                echo -e "${BLUE}Показ лога Nginx (Выход: Ctrl+C)...${NC}\n"
-                tail -n 100 -f "$LOG_DIR/nginx/access.log" || true
-                ;;
-            4)
-                clear
-                echo -e "${BLUE}Показ Docker-логов remnanode (Выход: Ctrl+C)...${NC}\n"
-                docker compose -f "$APP_DIR/docker-compose.yml" logs -f --tail=100 || true
-                ;;
-            5)
-                log "${INFO} Запуск принудительной ротации логов..."
-                if logrotate -f /etc/logrotate.d/remnanode; then
-                    log "${SUCCESS} Ротация логов успешно выполнена!"
-                else
-                    log "${ERROR} Ошибка выполнения ротации!"
-                fi
-                sleep 1.5
-                ;;
-            0)
+        while true; do
+            clear
+            echo -e "${GREEN}"
+            echo "  ========================================================"
+            echo "  📊 ДИАГНОСТИКА И ПРОСМОТР ЛОГОВ НОДЫ"
+            echo "  ========================================================"
+            echo -e "${NC}"
+            
+            if [ ! -f "$APP_DIR/docker-compose.yml" ]; then
+                echo -e "${RED} Нода еще не установлена! Логи недоступны.${NC}"
+                pause_prompt
                 return
-                ;;
-        esac
-    done
+            fi
+
+            # 1. Проверка системных ресурсов
+            echo -e "📌 ${WHITE}Ресурсы сервера:${NC}"
+            
+            # Локале-независимый расчет CPU через ps
+            local cpu_use; cpu_use=$(ps -eo pcpu 2>/dev/null | awk 'NR>1 {sum+=$1} END {print sum}')
+            if [ -z "$cpu_use" ] || [ "$cpu_use" = "0" ]; then
+                cpu_use="Недоступно"
+            else
+                local cores; cores=$(nproc 2>/dev/null || echo 1)
+                cpu_use=$(awk "BEGIN {print int($cpu_use/$cores)}")"%"
+            fi
+            
+            local mem_info; mem_info=$(free -h 2>/dev/null | grep "Mem:")
+            local mem_used; mem_used=$(echo "$mem_info" | awk '{print $3}' || echo "N/A")
+            local mem_total; mem_total=$(echo "$mem_info" | awk '{print $2}' || echo "N/A")
+            local mem_use="${mem_used} / ${mem_total}"
+            
+            local disk_use; disk_use=$(df -h "$APP_DIR" 2>/dev/null | tail -1 | awk '{print $5 " (Свободно " $4 ")"}' || echo "Недоступно")
+            
+            echo -e "   - Загрузка CPU:     ${CYAN}$cpu_use${NC}"
+            echo -e "   - Использование ОЗУ: ${CYAN}$mem_use${NC}"
+            echo -e "   - Занято на диске:   ${CYAN}$disk_use${NC}"
+            
+            # 2. Проверка статуса докеров
+            echo -e "\n📌 ${WHITE}Статус Docker контейнеров:${NC}"
+            local node_status="${RED}○ Остановлен${NC}"
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "remnanode"; then
+                node_status="${GREEN}● Запущен${NC}"
+            fi
+            
+            local nginx_status="${RED}○ Остановлен${NC}"
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "remnawave-nginx"; then
+                nginx_status="${GREEN}● Запущен${NC}"
+            fi
+            
+            echo -e "   - remnanode:        $node_status"
+            echo -e "   - remnawave-nginx:  $nginx_status"
+            
+            # 3. Вес файлов логов на хосте
+            echo -e "\n📌 ${WHITE}Размер лог-файлов на хосте:${NC}"
+            local node_acc_size; node_acc_size=$(du -sh "$LOG_DIR/node/xray.out.log" 2>/dev/null | awk '{print $1}' || echo "0B")
+            local node_err_size; node_err_size=$(du -sh "$LOG_DIR/node/xray.err.log" 2>/dev/null | awk '{print $1}' || echo "0B")
+            local nginx_acc_size; nginx_acc_size=$(du -sh "$LOG_DIR/nginx/access.log" 2>/dev/null | awk '{print $1}' || echo "0B")
+            local nginx_err_size; nginx_err_size=$(du -sh "$LOG_DIR/nginx/error.log" 2>/dev/null | awk '{print $1}' || echo "0B")
+            
+            echo -e "   - Xray access.log:  ${CYAN}$node_acc_size${NC}"
+            echo -e "   - Xray error.log:   ${CYAN}$node_err_size${NC}"
+            echo -e "   - Nginx access.log:  ${CYAN}$nginx_acc_size${NC}"
+            echo -e "   - Nginx error.log:   ${CYAN}$nginx_err_size${NC}"
+            
+            echo -e "${GRAY}--------------------------------------------------${NC}"
+            echo " 1) 📥 Лог запросов Xray (access.log) в реальном времени"
+            echo " 2) 📥 Лог ошибок Xray (error.log) в реальном времени"
+            echo " 3) 📥 Лог запросов веб-сервера Nginx в реальном времени"
+            echo " 4) 📥 Вывод логов из контейнера Docker (remnanode)"
+            echo " 5) 🔄 Вынужденно применить ротацию логов (logrotate)"
+            echo " 0) Назад"
+            echo -e "${GRAY}--------------------------------------------------${NC}"
+            read -p "Выберите действие [0-5]: " log_choice
+            log_choice=${log_choice:-0}
+            
+            case $log_choice in
+                1)
+                    clear
+                    echo -e "${BLUE}Показ лога access.log (Выход: Ctrl+C)...${NC}\n"
+                    tail -n 100 -f "$LOG_DIR/node/xray.out.log" || true
+                    ;;
+                2)
+                    clear
+                    echo -e "${BLUE}Показ лога error.log (Выход: Ctrl+C)...${NC}\n"
+                    tail -n 100 -f "$LOG_DIR/node/xray.err.log" || true
+                    ;;
+                3)
+                    clear
+                    echo -e "${BLUE}Показ лога Nginx (Выход: Ctrl+C)...${NC}\n"
+                    tail -n 100 -f "$LOG_DIR/nginx/access.log" || true
+                    ;;
+                4)
+                    clear
+                    echo -e "${BLUE}Показ Docker-логов remnanode (Выход: Ctrl+C)...${NC}\n"
+                    docker compose -f "$APP_DIR/docker-compose.yml" logs -f --tail=100 || true
+                    ;;
+                5)
+                    echo -e "${INFO} Запуск принудительной ротации логов..."
+                    if logrotate -f /etc/logrotate.d/remnanode; then
+                        echo -e "${SUCCESS} Ротация логов успешно выполнена!"
+                    else
+                        echo -e "${ERROR} Ошибка выполнения ротации!"
+                    fi
+                    sleep 1.5
+                    ;;
+                0)
+                    return
+                    ;;
+            esac
+        done
+    )
 }
 
-# 8) Управление кастомными портами Xray Core и правилами UFW
+# --- Управление кастомными портами Xray Core и правилами UFW ---
 manage_xray_ports() {
     while true; do
         clear
@@ -1244,7 +1504,7 @@ manage_xray_ports() {
         if [ -f "$APP_DIR/.xray_ports" ] && [ -s "$APP_DIR/.xray_ports" ]; then
             local current_ports; current_ports=$(cat "$APP_DIR/.xray_ports" | tr '\n' ' ' | xargs)
             for port in $current_ports; do
-                echo -e "   - Порт: ${GREEN}$port${NC} (UFW: Разрешен TCP/UDP входящий)"
+                echo -e "   - Port: ${GREEN}$port${NC} (UFW: Разрешен TCP/UDP входящий)"
             done
         else
             echo -e "   ${GRAY}Список пуст. Кастомные клиентские порты не настроены.${NC}"
@@ -1278,7 +1538,7 @@ manage_xray_ports() {
                         ufw allow "$input_port"/udp comment 'Xray Custom Port UDP' >> "$LOG_FILE" 2>&1
                         ufw reload >> "$LOG_FILE" 2>&1
                         
-                        log "${SUCCESS} Порт $input_port успешно добавлен и разрешен в UFW!"
+                        log "${SUCCESS} Port $input_port успешно добавлен и разрешен в UFW!"
                     fi
                 else
                     log "${ERROR} Неверный формат порта. Введите число (например, 8443) или диапазон (например, 3000:3010)."
@@ -1325,13 +1585,77 @@ manage_xray_ports() {
     done
 }
 
+# 9) Управление маскировочными шаблонами Selfsteal (с возможностью рандома и выбора конкретного)
+change_decoy_template_menu() {
+    while true; do
+        clear
+        echo -e "${GREEN}"
+        echo "  ========================================================"
+        echo "  🎭 СМЕНА МАСКИРОВОЧНОГО ШАБЛОНА САЙТА (SELFSTEAL)"
+        echo "  ========================================================"
+        echo -e "${NC}"
+        
+        if [ ! -f "$APP_DIR/docker-compose.yml" ]; then
+            log "${ERROR} Нода еще не установлена! Маскировка недоступна."
+            pause_prompt
+            return
+        fi
+        
+        local node_domain; node_domain=$(cat "$APP_DIR/.node_domain" 2>/dev/null || echo "localhost")
+        
+        echo -e "📌 Домен вашей ноды: ${CYAN}$node_domain${NC}"
+        echo -e "--------------------------------------------------------"
+        echo " 1) 🔄 Сменить шаблон на СЛУЧАЙНЫЙ (Рандомно)"
+        echo " 2) 🎨 Выбрать КОНКРЕТНЫЙ шаблон из списка"
+        echo " 0) Назад"
+        echo -e "${GRAY}--------------------------------------------------${NC}"
+        read -p "Выберите действие [0-2]: " temp_choice
+        temp_choice=${temp_choice:-0}
+        
+        local templates=("endless-verify" "esports-stream-template" "levelup-hub" "playza-game-catalog" "rybaliti-2.0" "screenwire-digest" "vibrai-photo-editor" "worldzoo-stream-template")
+        local templates_ru=("Страница верификации (endless-verify)" "Киберспортивный портал (esports-stream-template)" "Игровой хаб для геймеров (levelup-hub)" "Каталог онлайн-игр (playza-game-catalog)" "Блог/Форум о рыбалке (rybaliti-2.0)" "Новостной IT-дайджест (screenwire-digest)" "Онлайн-фоторедактор (vibrai-photo-editor)" "Стримы из зоопарков (worldzoo-stream-template)")
+        
+        case $temp_choice in
+            1)
+                generate_masked_template "$node_domain"
+                docker restart remnawave-nginx >> "$LOG_FILE" 2>&1 || true
+                log "${SUCCESS} Маскировочный шаблон успешно изменен на случайный и перезапущен!"
+                pause_prompt
+                ;;
+            2)
+                echo -e "\n${BLUE}Доступные профессиональные шаблоны:${NC}"
+                for i in "${!templates[@]}"; do
+                    echo -e " $((i+1))) ${templates_ru[$i]}"
+                done
+                echo -e "${GRAY}--------------------------------------------------${NC}"
+                read -p "Выберите номер шаблона [1]: " template_num
+                template_num=${template_num:-1}
+                local index=$((template_num - 1))
+                
+                if [ $index -ge 0 ] && [ $index -lt ${#templates[@]} ]; then
+                    local chosen="${templates[$index]}"
+                    generate_masked_template "$node_domain" "$chosen"
+                    docker restart remnawave-nginx >> "$LOG_FILE" 2>&1 || true
+                    log "${SUCCESS} Маскировочный сайт успешно изменен на '${chosen}' и перезапущен!"
+                else
+                    log "${ERROR} Неверный номер шаблона."
+                fi
+                pause_prompt
+                ;;
+            0)
+                return
+                ;;
+        esac
+    done
+}
+
 # --- Главное интерактивное меню ---
 main_menu() {
     while true; do
         clear
         echo -e "${GREEN}"
         echo "  ========================================================"
-        echo "  🚀 REMNANODE ИНТЕРАКТИВНОЕ УПРАВЛЕНИЕ НОДОЙ (v1.5.2)"
+        echo "  🚀 REMNANODE ИНТЕРАКТИВНОЕ УПРАВЛЕНИЕ НОДОЙ (v1.7.2)"
         echo "  ========================================================"
         echo -e "${NC}"
         
@@ -1358,9 +1682,11 @@ main_menu() {
         echo " 6) 🗑️  Полное удаление ноды с откатом всех изменений"
         echo " 7) 📊 Диагностика и просмотр логов ноды"
         echo " 8) 🔌 Управление клиентскими портами Xray и UFW"
+        echo " 9) 🎭 Смена маскировочного шаблона сайта (Selfsteal)"
+        echo " 10) 🧪 Запустить мульти-тесты и диагностику сервера (YABS/DPI)"
         echo " 0) Выход"
         echo -e "${GRAY}--------------------------------------------------${NC}"
-        read -p "Выберите действие [0-8]: " menu_choice
+        read -p "Выберите действие [0-10]: " menu_choice
         menu_choice=${menu_choice:-0}
         
         case $menu_choice in
@@ -1372,6 +1698,8 @@ main_menu() {
             6) uninstall_and_rollback ;;
             7) diagnose_and_logs ;;
             8) manage_xray_ports ;;
+            9) change_decoy_template_menu ;;
+            10) run_server_multitests ;;
             0) exit 0 ;;
             *) echo -e "${RED}Неверный выбор.${NC}"; sleep 1 ;;
         esac
