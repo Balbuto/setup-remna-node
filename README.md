@@ -99,12 +99,12 @@
 Запустите скрипт одной командой на вашем чистом сервере Ubuntu/Debian:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Balbuto/setup-remna-node/dev/setup_node.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Balbuto/setup-remna-node/main/setup_node.sh | sudo bash
 ```
 
 Или альтернативный вариант через `wget`:
 ```bash
-wget -qO- https://raw.githubusercontent.com/Balbuto/setup-remna-node/dev/setup_node.sh | sudo bash
+wget -qO- https://raw.githubusercontent.com/Balbuto/setup-remna-node/main/setup_node.sh | sudo bash
 ```
 
 > **Важно**: При первом запуске скрипт автоматически зарегистрирует себя в глобальной CLI-оболочке хоста. В дальнейшем вы сможете вызывать интерактивное меню из любой папки терминала простой командой:
