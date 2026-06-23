@@ -1,4 +1,4 @@
-# 🚀 RemnaNode Advanced Installer & Optimizer CLI (v1.7.0)
+# 🚀 RemnaNode Advanced Installer & Optimizer CLI (v1.7.0 Beta)
 
 [![Лицензия](https://img.shields.io/badge/Лицензия-MIT-blue.svg)](LICENSE)
 [![Платформа](https://img.shields.io/badge/ОС-Ubuntu%20%7C%20Debian-orange.svg)](#)
@@ -99,7 +99,7 @@
 Запустите скрипт одной командой на вашем чистом сервере Ubuntu/Debian:
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/Mrvibecodic/node-templates/main/setup_node.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/Balbuto/setup-remna-node/dev/setup_node.sh)
 ```
 
 > **Важно**: При первом запуске скрипт автоматически зарегистрирует себя в глобальной CLI-оболочке хоста. В дальнейшем вы сможете вызывать интерактивное меню из любой папки терминала простой командой:
