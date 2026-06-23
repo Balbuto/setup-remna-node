@@ -1708,7 +1708,6 @@ main_menu() {
 
 # --- Главная точка входа ---
 main() {
-    check_root
     check_os
     detect_arch
     
